@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_appName__",
+  "version": "0.0.01",
+  "author": "Clay Smith",
+  "short_name": "Word Prediction",
+  "default_locale": "en",
+  "description": "Word Prediction",
+  "permissions": [
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "128": "images/128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "images/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "run_at": "document_idle",
+      "js": [
+        "runtime.js",
+        "polyfills.js",
+        "main.js",
+        "contentscript.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "all_frames": true
+    }
+  ]
+}
