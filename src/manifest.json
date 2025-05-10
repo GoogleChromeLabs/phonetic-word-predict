@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "__MSG_appName__",
-  "version": "0.0.01",
+  "version": "0.0.02",
   "author": "Clay Smith",
-  "short_name": "Word Prediction",
-  "default_locale": "en",
+  "short_name": "__MSG_appName__",
+  "default_locale": "fr",
   "description": "Word Prediction",
   "permissions": [
     "storage"
