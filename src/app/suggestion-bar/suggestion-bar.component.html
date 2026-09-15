@@ -14,10 +14,15 @@
  limitations under the License.
 -->
 
+<div class="input-container" [class.visible]="isInputVisible">
+  <input #manualInput type="text" class="manual-input" [placeholder]="chrome.i18n.getMessage('typeForSuggestions')"
+    (input)="onManualInput()" (mousedown)="$event.stopPropagation()" />
+</div>
+
 <div class="suggestion-outer-container"
      (mousedown)="onDragStart($event)">
 
-  <div class="drag-handle" title="Drag to move">⠿</div>
+  <div class="drag-handle" [title]="chrome.i18n.getMessage('dragHandle')">{{ chrome.i18n.getMessage('dragHandleIcon') }}</div>
 
   @if (isLoading) {
     <div class="loading-indicator">
@@ -30,15 +35,23 @@
       @for (suggestion of suggestions; track suggestion) { <span
           class="suggestion-item"
           (click)="selectWord(suggestion)"
-          (mousedown)="$event.stopPropagation()"> {{ suggestion }}
+          (mousedown)="$event.stopPropagation()"
+          [title]="chrome.i18n.getMessage('clickToCopy')"> {{ suggestion }}
         </span>
       }
     </div>
-  } @else if (!isLoading && suggestions.length === 0) {
+  } @else if (!isLoading && suggestions.length === 0 && !isInputVisible) {
       <div class="no-suggestions-placeholder"></div>
   }
 
-  <button class="dismiss-button" (click)="dismiss()" title="Dismiss suggestions">
-    &times; </button>
+  <div class="button-group">
+    <button class="icon-button toggle-button" (click)="toggleInput()" (mousedown)="$event.stopPropagation()"
+      [title]="chrome.i18n.getMessage('toggleManualInput')">
+      {{ isInputVisible ? '▲' : '▼' }}
+    </button>
+    <button class="icon-button dismiss-button" (click)="dismiss()" [title]="chrome.i18n.getMessage('dismissSuggestions')">
+      &times;
+    </button>
+  </div>
 
 </div>

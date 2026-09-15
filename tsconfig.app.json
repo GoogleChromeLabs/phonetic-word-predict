@@ -4,12 +4,15 @@
     "outDir": "./out-tsc/app",
     "types": [
       "chrome"
+    ],
+    "lib": [
+      "ES2022",
+      "dom"
     ]
   },
   "files": [
     "./src/main.ts",
-    "./src/background.ts",
-
+    "./src/background.ts"
   ],
   "include": [
     "src/**/*.d.ts"

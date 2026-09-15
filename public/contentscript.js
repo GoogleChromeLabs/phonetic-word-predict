@@ -1,31 +1,24 @@
-/**
- * Copyright 2025 Google LLC
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 // ==========================================================================
-// 1. Content Script Logic (Updated Suggestion Clearing Logic)
-//    - Creates host element once on load.
-//    - Connects to background script via chrome.runtime.connect.
-//    - Listens for state updates on the connection port.
-//    - Hides element on dismiss, doesn't destroy automatically.
-//    - Preserves dragged position.
-//    - Keeps old suggestions if no new ones are found.
-//    - Clears suggestions when whitespace/punctuation is typed after a word.
+// 1. Content Script Logic (Listen to Window Keystrokes)
+//    - Injects into all frames.
+//    - Top window creates the UI host and listens for messages from iframes.
+//    - Iframes detect text selection/typing and post messages to the top window.
+//    - Top window is the single source of truth for background communication.
 // ==========================================================================
 
-console.log('Content script (JS) loaded - Persistent Mode.');
+console.log('Content script (JS) loaded - Persistent Mode, Window Keystrokes.');
+
+// --- Constants ---
+const IS_TOP_WINDOW = window.self === window.top;
+const MESSAGE_SOURCE = 'word-predictor-content-script';
+
+// --- Diagnostic Logging ---
+if (IS_TOP_WINDOW) {
+  console.log('[ContentScript] Running in top window.');
+} else {
+  console.log('[ContentScript] Running in an iframe.');
+}
+// ---
 
 // --- Configuration ---
 const DEBOUNCE_MS = 300;
@@ -35,13 +28,14 @@ const INITIAL_POS_RIGHT = '20px';
 const PORT_NAME = 'suggestionState'; // Name for the connection port (MUST MATCH BACKGROUND)
 
 // --- State Management ---
-let currentInputElement = null; // Currently focused input/textarea
-let lastWordInfo = null; // Info about the word being typed { word, start, end }
-let suggestionHostElement = null; // Reference to the <suggestion-bar-host> element
-let debounceTimer = null; // Timer ID for debouncing
-let backgroundStatePort = null; // Holds the connection port to the background script
+let currentEditableElement = null; // HTMLElement | null (focused editable element, relevant in the active frame)
+let lastWordInfo = null; // { word: string; start: number; end: number; isEditableDiv?: boolean } | null
+let suggestionHostElement = null; // Reference to the <suggestion-bar-host> element (TOP WINDOW ONLY)
+let debounceTimer = null; // Timer ID for debouncing (per-frame)
+let backgroundStatePort = null; // Holds the connection port to the background script (TOP WINDOW ONLY)
 
-// --- Suggestion Host Management ---
+
+// --- Suggestion Host Management (TOP WINDOW ONLY) ---
 
 /**
  * Ensures the host element exists in the DOM. Creates and positions it
@@ -49,6 +43,8 @@ let backgroundStatePort = null; // Holds the connection port to the background s
  * @returns {HTMLElement | null} The suggestion host element or null if creation failed.
  */
 function ensureSuggestionHostExists() {
+  if (!IS_TOP_WINDOW) return null; // Only run in top window
+
   // If element already exists, return it
   if (suggestionHostElement && document.body.contains(suggestionHostElement)) {
     return suggestionHostElement;
@@ -70,16 +66,42 @@ function ensureSuggestionHostExists() {
       suggestionHostElement.setAttribute('data-suggestions', '[]'); // Start empty
 
       // --- Event Listener for Word Selection ---
+      // This event is for when a user clicks a suggestion. The replacement logic is tricky
+      // across frames, so for now, we'll just log it. A real implementation would
+      // need to post a message back to the originating iframe to perform the replacement.
       suggestionHostElement.addEventListener('wordSelectedEvent', (event) => {
           const selectedWord = event.detail;
-          console.log('Word selected event caught by content script:', selectedWord);
-          if (currentInputElement && lastWordInfo && typeof selectedWord === 'string') {
-            replaceWord(currentInputElement, lastWordInfo, selectedWord);
-          }
-          if (suggestionHostElement) { // Clear suggestions after selection
+          console.log('Word selected event caught by top window. Replacement in iframes is a TODO.');
+          // NOTE: The original replaceWord() function is difficult to make work reliably
+          // across iframes without a more complex messaging system to handle the replacement.
+          // For now, we just hide the suggestions.
+          if (suggestionHostElement) {
             suggestionHostElement.setAttribute('data-suggestions', '[]');
           }
         });
+
+      suggestionHostElement.addEventListener('manualWordUpdate', (event) => {
+        const word = event.detail;
+        console.log('Manual word update event caught by content script.');
+        chrome.runtime.sendMessage({ type: 'CURRENT_WORD_UPDATE', payload: word }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error('Error sending message:', chrome.runtime.lastError.message);
+            return;
+          }
+          if (response && response.success && response.matches) {
+            if (response.matches.length > 0) {
+              console.log('Received suggestions for manual input.');
+              if (suggestionHostElement) { suggestionHostElement.setAttribute('data-suggestions', JSON.stringify(response.matches)); }
+            } else {
+              console.log('Received empty suggestions array for manual input.');
+              if (suggestionHostElement) { suggestionHostElement.setAttribute('data-suggestions', '[]'); }
+            }
+          } else {
+            console.log('No suggestions received or background failed for manual input.');
+            if (suggestionHostElement) { suggestionHostElement.setAttribute('data-suggestions', '[]'); }
+          }
+        });
+      });
 
       // --- Event Listener for Dismiss Request ---
       suggestionHostElement.addEventListener('dismissRequestEvent', (event) => {
@@ -107,7 +129,7 @@ function ensureSuggestionHostExists() {
 
 /**
  * Sets the initial fixed position of the suggestion host,
- * respecting the 'data-dragged' attribute if the element somehow pre-exists.
+ * respecting the 'data-dragged' attribute.
  */
 function positionSuggestionHostInitially() {
   if (!suggestionHostElement) return;
@@ -141,7 +163,6 @@ function hideSuggestionHost() {
 
 /**
  * Updates the loading attribute on the host element based on received state.
- * @param {string | undefined} state The state received ('ready', 'building', etc.)
  */
 function updateLoadingAttribute(state) {
   if (suggestionHostElement && document.body.contains(suggestionHostElement)) {
@@ -153,11 +174,12 @@ function updateLoadingAttribute(state) {
   }
 }
 
-// --- Connect to Background Script ---
+// --- Connect to Background Script (TOP WINDOW ONLY) ---
 /**
  * Establishes and manages the long-lived connection to the background script.
  */
 function connectToBackground() {
+  if (!IS_TOP_WINDOW) return;
   if (backgroundStatePort) { return; } // Already connected
   try {
     console.log(`Connecting to background script with port name: ${PORT_NAME}`);
@@ -169,160 +191,272 @@ function connectToBackground() {
       }
     });
     backgroundStatePort.onDisconnect.addListener(() => {
-      console.error("Background port disconnected.");
+      console.log("Background port disconnected.");
       if (chrome.runtime.lastError) { console.error("Disconnection error:", chrome.runtime.lastError.message); }
       backgroundStatePort = null;
-      updateLoadingAttribute('error');
     });
     console.log("Connection port established.");
   } catch (error) {
     console.error("Error connecting to background script:", error);
     backgroundStatePort = null;
-    updateLoadingAttribute('error');
   }
 }
 
-// --- Input Event Handling ---
+// --- Helper to detect sensitive input fields ---
+function isSensitiveElement(element) {
+  if (!element || !(element instanceof HTMLElement)) return false;
+
+  if (element.getAttribute('aria-hidden') === 'true' || (element.closest && element.closest('[aria-hidden="true"]'))) {
+    return true;
+  }
+
+  if (element instanceof HTMLInputElement) {
+    const type = (element.type || '').toLowerCase();
+    const sensitiveTypes = ['password', 'email', 'tel', 'number', 'hidden'];
+    if (sensitiveTypes.includes(type)) return true;
+
+    const autocomplete = (element.autocomplete || '').toLowerCase();
+    if (/^(cc-|.*password|one-time-code|tel|email|transaction-)/.test(autocomplete)) return true;
+
+    const inputmode = (element.inputMode || element.getAttribute('inputmode') || '').toLowerCase();
+    if (inputmode === 'numeric' || inputmode === 'decimal' || inputmode === 'tel' || inputmode === 'email') return true;
+  }
+
+  if (element instanceof HTMLTextAreaElement) {
+    const autocomplete = (element.autocomplete || '').toLowerCase();
+    if (/^(cc-|.*password|one-time-code)/.test(autocomplete)) return true;
+  }
+
+  return false;
+}
+
+// --- Input Event Handling (ALL FRAMES) ---
 /**
  * Handles debounced input events to detect words and trigger suggestion requests.
- * @param {Event} event - The input event object.
+ * @param {HTMLElement} targetElement The editable element where typing occurred.
  */
-function debouncedHandleInput(event) {
-  const target = event.target;
-  currentInputElement = target;
-  const text = target.value;
-  const cursorPosition = target.selectionStart;
+function debouncedHandleInput(targetElement) {
+  if (isSensitiveElement(targetElement)) {
+    if (lastWordInfo) {
+      window.top.postMessage({ source: MESSAGE_SOURCE, type: 'CLEAR_SUGGESTIONS' }, '*');
+      lastWordInfo = null;
+    }
+    return;
+  }
 
-  const host = ensureSuggestionHostExists();
-  if (!host) return;
+  currentEditableElement = targetElement; // Store the active editable element
+
+  // --- Enhanced Diagnostic Logging ---
+  console.log(`[ContentScript Debug] debouncedHandleInput triggered for element:`, targetElement.tagName);
+  const selection = window.getSelection();
+  // ---
+
+  // --- Handle Text Selection ---
+  if (selection && selection.toString().length > 0) {
+    const selectedText = selection.toString().trim();
+    if (selectedText.length >= MIN_WORD_LENGTH) {
+      console.log(`[ContentScript] Detected selection in ${IS_TOP_WINDOW ? 'top window' : 'iframe'}`);
+      // Always post to top window to handle the logic
+      window.top.postMessage({ source: MESSAGE_SOURCE, type: 'WORD_UPDATE', payload: selectedText }, '*');
+    }
+    return; // Don't process further if there's a selection
+  }
+
+  // --- Handle Typed Text (Logic for finding current word) ---
+  let textContent = '';
+  let cursorPosition = null;
+
+  if (targetElement instanceof HTMLInputElement || targetElement instanceof HTMLTextAreaElement) {
+    textContent = targetElement.value;
+    cursorPosition = targetElement.selectionStart;
+  } else if (targetElement.isContentEditable) {
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0 && targetElement.contains(selection.anchorNode)) {
+      textContent = targetElement.textContent || "";
+      const range = selection.getRangeAt(0).cloneRange();
+      range.selectNodeContents(targetElement);
+      range.setEnd(selection.anchorNode, selection.anchorOffset);
+      cursorPosition = range.toString().length;
+    } else {
+      return; // No valid selection
+    }
+  } else {
+    return; // Not a recognized editable element
+  }
 
   if (cursorPosition === null) {
-    host.setAttribute('data-suggestions', '[]');
+    return;
+  }
+
+  const textBeforeCursor = textContent.slice(0, cursorPosition);
+  const matchBefore = textBeforeCursor.match(/(\S+)$/);
+  if (!matchBefore) {
+      // No word before cursor, clear suggestions
+      window.top.postMessage({ source: MESSAGE_SOURCE, type: 'CLEAR_SUGGESTIONS' }, '*');
       lastWordInfo = null;
       return;
-    }
+  }
 
-  // Find word boundaries
-  const textBeforeCursor = text.slice(0, cursorPosition);
-  const textAfterCursor = text.slice(cursorPosition);
-  const matchBefore = textBeforeCursor.match(/(\S+)$/);
-  const start = matchBefore?.index ?? cursorPosition;
+  const wordPartBefore = matchBefore[1];
+  const start = matchBefore.index;
+
+  const textAfterCursor = textContent.slice(cursorPosition);
   const matchAfter = textAfterCursor.match(/^(\S*)/);
   const wordPartAfter = matchAfter ? matchAfter[1] : '';
-  const wordEnd = cursorPosition + wordPartAfter.length;
+  const end = cursorPosition + wordPartAfter.length;
 
-  if (start === undefined) {
-    host.setAttribute('data-suggestions', '[]');
+  const currentWord = wordPartBefore + wordPartAfter;
+
+  const isPotentialWord = currentWord && currentWord.length >= MIN_WORD_LENGTH && !/\s/.test(currentWord);
+
+  if (isPotentialWord) {
+    const currentWordInfo = { word: currentWord, start: start, end: end };
+    if (JSON.stringify(currentWordInfo) !== JSON.stringify(lastWordInfo)) {
+      lastWordInfo = currentWordInfo;
+      console.log('Potential word detected. Posting message to top window.');
+      window.top.postMessage({ source: MESSAGE_SOURCE, type: 'WORD_UPDATE', payload: currentWord }, '*');
+    }
+  } else {
+    if (lastWordInfo) {
+      console.log('Input is not a valid word, clearing suggestions.');
       lastWordInfo = null;
+      window.top.postMessage({ source: MESSAGE_SOURCE, type: 'CLEAR_SUGGESTIONS' }, '*');
+    }
+  }
+}
+
+
+// --- Event Listener Setup (ALL FRAMES) ---
+
+// Listen for 'keyup' and 'selectionchange' on the document
+function setupEventListeners() {
+    const GDocsEditorSelector = '.kix-app-view-editor';
+
+    const handleEvent = (event) => {
+        const activeElement = document.activeElement;
+
+        // We still need to find the right element to read from, which might be the activeElement
+        // or a specific child of the event's target.
+        let targetElement = activeElement;
+        if (event.currentTarget && event.currentTarget.contains(activeElement)) {
+            targetElement = activeElement;
+        } else {
+            // Fallback for when activeElement is not within the listener's target (e.g. body)
+            targetElement = event.target;
+        }
+
+        if (targetElement instanceof HTMLInputElement ||
+            targetElement instanceof HTMLTextAreaElement ||
+            (targetElement instanceof HTMLElement && targetElement.isContentEditable)
+        ) {
+            if (isSensitiveElement(targetElement)) {
+                if (lastWordInfo) {
+                    window.top.postMessage({ source: MESSAGE_SOURCE, type: 'CLEAR_SUGGESTIONS' }, '*');
+                    lastWordInfo = null;
+                }
+                return;
+            }
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                debouncedHandleInput(targetElement);
+            }, DEBOUNCE_MS);
+        } else {
+            if (lastWordInfo) {
+                window.top.postMessage({ source: MESSAGE_SOURCE, type: 'CLEAR_SUGGESTIONS' }, '*');
+                lastWordInfo = null;
+            }
+        }
+    };
+
+    const attachListeners = (element) => {
+        console.log("[ContentScript] Attaching event listeners to:", element);
+        element.addEventListener('keyup', handleEvent, true);
+        element.addEventListener('selectionchange', handleEvent, true); // This might not fire on divs, but we try.
+        // Mouseup is a good fallback for selection
+        element.addEventListener('mouseup', handleEvent, true);
+    };
+
+    // Attempt to find the Google Docs editor immediately
+    const gdocsEditor = document.querySelector(GDocsEditorSelector);
+    if (gdocsEditor) {
+        console.log("[ContentScript] Found Google Docs editor immediately.");
+        attachListeners(gdocsEditor);
+    } else {
+        console.log("[ContentScript] Google Docs editor not found immediately. Using MutationObserver.");
+        // If it's not there, watch for it to be added to the DOM
+        const observer = new MutationObserver((mutations, obs) => {
+            const editor = document.querySelector(GDocsEditorSelector);
+            if (editor) {
+                console.log("[ContentScript] Google Docs editor appeared.");
+                attachListeners(editor);
+                obs.disconnect(); // Stop observing once we've found it.
+            }
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    // Fallback for non-Google Docs sites
+    attachListeners(document);
+
+    console.log("Content script event listeners attached.");
+}
+
+
+// --- Message Listener (TOP WINDOW ONLY) ---
+if (IS_TOP_WINDOW) {
+  window.addEventListener('message', (event) => {
+    // Basic validation
+    if (event.source === window || !event.data || event.data.source !== MESSAGE_SOURCE) {
       return;
     }
 
-  const currentWord = text.slice(start, wordEnd).trim();
-  const isPotentialWord = currentWord && currentWord.length >= MIN_WORD_LENGTH && !/\s/.test(currentWord);
+    console.log('[Top Window] Received message from iframe:', event.data);
 
-  // Check if it's a potential word to get suggestions for
-  if (isPotentialWord) {
-    const currentWordInfo = { word: currentWord, start: start, end: wordEnd };
-    // Only send if the word or position actually changed
-    if (JSON.stringify(currentWordInfo) !== JSON.stringify(lastWordInfo)) {
-          lastWordInfo = currentWordInfo; // Store info about the word we are requesting for
-          console.log(`Potential word detected: "${currentWord}"`);
+    const { type, payload } = event.data;
+    const host = ensureSuggestionHostExists(); // Ensure host exists before processing
+    if (!host) return;
 
-          // Send message to background script for suggestions
-          chrome.runtime.sendMessage(
-            { type: 'CURRENT_WORD_UPDATE', payload: currentWord },
-            (response) => {
-                  if (chrome.runtime.lastError) { console.error('Error sending message:', chrome.runtime.lastError.message); return; }
+    if (type === 'WORD_UPDATE') {
+      // A word was selected or typed in an iframe.
+      // We can't get a direct reference to the element, so replacement is tricky.
+      // We store a placeholder info object.
+      lastWordInfo = { word: payload, start: -1, end: -1, isEditableDiv: true };
+      currentEditableElement = null; // Can't get a direct reference
 
-                  // Check if context is still valid
-                  const stillValidContext = document.activeElement === currentInputElement &&
-                    lastWordInfo &&
-                    lastWordInfo.word === currentWord &&
-                    currentInputElement.selectionStart >= lastWordInfo.start &&
-                    currentInputElement.selectionStart <= lastWordInfo.end;
-
-                  if (!stillValidContext) {
-                      console.log("Context changed during suggestion fetch, discarding suggestions response.");
-                      return; // Don't update suggestions if context changed
-                    }
-
-                  // --- Logic for handling suggestions response ---
-                  if (response && response.success && response.matches) {
-                      // Only update if suggestions array is NOT empty
-                      if (response.matches.length > 0) {
-                          console.log('Received suggestions:', response.matches);
-                          if (host) {
-                            host.style.display = 'block'; // Ensure visible
-                            host.setAttribute('data-suggestions', JSON.stringify(response.matches));
-                          }
-                        } else {
-                          // Received empty array - DO NOTHING to attribute
-                          console.log('Received empty suggestions array. Keeping previous suggestions displayed.');
-                          // Ensure host stays visible if it was already
-                          if (host) { host.style.display = 'block'; }
-                        }
-                    } else {
-                      // Background reported failure or invalid response
-                      console.log('No suggestions received or background failed. Keeping previous suggestions displayed.');
-                      // DO NOTHING to attribute here either
-                      // Ensure host stays visible if it was already
-                      if (host) { host.style.display = 'block'; }
-                    }
-                  // --- End Logic ---
-                }
-            );
-        }
-    } else {
-      // Not a potential word (e.g., too short, contains space/punctuation, empty)
-      // Clear suggestions ONLY if we were previously tracking a word (i.e., user typed space/deleted)
-      if (lastWordInfo) {
-          console.log(`Input "${currentWord}" is not a valid word for suggestions (or whitespace typed), clearing suggestions.`);
-          lastWordInfo = null;
-          if (host) {
-            host.setAttribute('data-suggestions', '[]'); // Clear suggestions attribute
+      chrome.runtime.sendMessage(
+        { type: 'CURRENT_WORD_UPDATE', payload: payload },
+        (response) => {
+          if (chrome.runtime.lastError) { console.error('Error sending message:', chrome.runtime.lastError.message); return; }
+          if (response && response.success && response.matches) {
+            if (response.matches.length > 0) {
+              console.log('Received suggestions for iframe word:', response.matches);
+              if (host) { host.style.display = 'block'; host.setAttribute('data-suggestions', JSON.stringify(response.matches)); }
+            } else {
+              console.log('Received empty suggestions array for iframe word. Hiding host.');
+              hideSuggestionHost();
+            }
+          } else {
+            console.log('No suggestions received or background failed for iframe word. Hiding host.');
+            hideSuggestionHost();
           }
         }
+      );
+    } else if (type === 'CLEAR_SUGGESTIONS') {
+      hideSuggestionHost();
     }
+  });
 }
-
-// --- Word Replacement Function ---
-function replaceWord(element, wordInfo, replacement) {
-  const originalValue = element.value;
-  const prefix = originalValue.substring(0, wordInfo.start);
-  const suffix = originalValue.substring(wordInfo.end);
-  element.value = prefix + replacement + ' ' + suffix;
-  const newCursorPos = wordInfo.start + replacement.length + 1;
-  element.focus();
-  element.setSelectionRange(newCursorPos, newCursorPos);
-  element.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-  lastWordInfo = null;
-  if (suggestionHostElement) {
-    // Clear suggestions after replacing word
-    suggestionHostElement.setAttribute('data-suggestions', '[]');
-  }
-}
-
-// --- Event Listener Setup ---
-
-// Input listener
-document.addEventListener('input', (event) => {
-  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      debouncedHandleInput(event);
-    }, DEBOUNCE_MS);
-  }
-}, true);
-
-// Listener for Background State Updates (via port)
-// (Listener added in connectToBackground)
 
 // --- Initial Setup ---
-let hostEnsured = false;
 function initialSetup() {
-  if (hostEnsured) return;
-  hostEnsured = true;
-  ensureSuggestionHostExists(); // Creates host and connects port
+  if (IS_TOP_WINDOW) {
+    ensureSuggestionHostExists(); // Creates host and connects port
+  }
+  setupEventListeners();
 }
 
 if (document.readyState === 'loading') {
@@ -330,6 +464,3 @@ if (document.readyState === 'loading') {
 } else {
   initialSetup();
 }
-
-console.log("Content script event listeners attached.");
-

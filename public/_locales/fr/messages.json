@@ -2,5 +2,29 @@
   "appName": {
     "message": "Prédictions de mots",
     "description": "Name of the application"
+  },
+  "dragHandle": {
+    "message": "Glisser pour déplacer",
+    "description": "Tooltip for the drag handle"
+  },
+  "clickToCopy": {
+    "message": "Cliquez pour copier",
+    "description": "Tooltip for each suggestion item"
+  },
+  "toggleManualInput": {
+    "message": "Basculer la saisie manuelle",
+    "description": "Tooltip for the toggle manual input button"
+  },
+  "dismissSuggestions": {
+    "message": "Rejeter les suggestions",
+    "description": "Tooltip for the dismiss button"
+  },
+  "typeForSuggestions": {
+    "message": "Tapez ici pour des suggestions...",
+    "description": "Placeholder for the manual input field"
+  },
+  "dragHandleIcon": {
+    "message": "⠿",
+    "description": "Icon for the drag handle"
   }
 }

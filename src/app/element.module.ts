@@ -17,11 +17,10 @@
 
 import { BrowserModule } from '@angular/platform-browser';
 import { NgModule, Injector, DoBootstrap } from '@angular/core';
-import { CommonModule } from '@angular/common'; // Import CommonModule here for component directives
+import {CommonModule} from '@angular/common';
 import { createCustomElement } from '@angular/elements';
 
-// Import the component to be turned into an element
-import { SuggestionBarComponent } from './suggestion-bar/suggestion-bar.component'; // Adjust path if needed
+import {SuggestionBarComponent} from './suggestion-bar/suggestion-bar.component';
 
 @NgModule({
   declarations: [
@@ -29,17 +28,15 @@ import { SuggestionBarComponent } from './suggestion-bar/suggestion-bar.componen
   ],
   imports: [
     BrowserModule,
-    CommonModule
+    CommonModule,
   ],
   providers: [],
 })
-export class ElementModule implements DoBootstrap { // Implement DoBootstrap
+export class ElementModule implements DoBootstrap {
   constructor(private injector: Injector) {
     console.log('ElementModule: Constructor - Defining custom element...');
-    // Convert the component to a custom element
     const SuggestionElement = createCustomElement(SuggestionBarComponent, { injector: this.injector });
 
-    // Define the custom element tag
     const customElementName = 'suggestion-bar-host';
     if (customElements.get(customElementName)) {
         console.warn(`ElementModule: Custom element "${customElementName}" is already defined.`);
